@@ -2,9 +2,11 @@
 
 import { useEffect, useState } from "react";
 import { format } from "date-fns";
-import { Activity, ServerCrash, CheckCircle2, Clock } from "lucide-react";
+import Link from "next/link";
+import { Activity, ServerCrash, CheckCircle2, Clock, ArrowRight } from "lucide-react";
 import { AgentLog } from "@/types";
 import { cn } from "@/lib/utils";
+import { InstructorWorkloadStats } from "@/components/pages/InstructorWorkloadStats";
 
 export function Dashboard() {
   const [data, setData] = useState<{
@@ -43,6 +45,22 @@ export function Dashboard() {
         <p className="text-slate-500 mt-2">
           实时监控底层 AI 评审作业的并发状态与成功率。
         </p>
+      </div>
+
+      <div className="space-y-3">
+        <div className="flex items-center justify-between">
+          <h2 className="text-sm font-semibold text-slate-700">
+            本周个人工作量
+          </h2>
+          <Link
+            href="/workload"
+            className="text-sm text-blue-600 hover:text-blue-700 font-medium inline-flex items-center gap-1"
+          >
+            查看详情
+            <ArrowRight className="w-4 h-4" />
+          </Link>
+        </div>
+        <InstructorWorkloadStats compact />
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">

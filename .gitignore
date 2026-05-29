@@ -64,6 +64,9 @@ next-env.d.ts
 # local sqlite database
 /db_data/
 
+# homework file uploads
+/uploads/
+
 /demo
 
 .cursor/

@@ -2,7 +2,11 @@
 
 import { useEffect } from "react";
 import { usePathname, useRouter } from "next/navigation";
-import { Layout, InstructorSidebar } from "@/components/Layout";
+import {
+  Layout,
+  InstructorSidebar,
+  StudentSidebar,
+} from "@/components/Layout";
 import { useAuth } from "@/context/AuthContext";
 
 const INSTRUCTOR_ONLY_PATHS = [
@@ -11,6 +15,7 @@ const INSTRUCTOR_ONLY_PATHS = [
   "/assignments",
   "/kb",
   "/crm",
+  "/workload",
 ];
 
 export function AppShell({ children }: { children: React.ReactNode }) {
@@ -43,7 +48,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   }
 
   if (role === "student") {
-    return <>{children}</>;
+    return <Layout sidebar={<StudentSidebar />}>{children}</Layout>;
   }
 
   return <Layout sidebar={<InstructorSidebar />}>{children}</Layout>;

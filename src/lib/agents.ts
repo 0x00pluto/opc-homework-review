@@ -1,4 +1,8 @@
 import { getDb } from "./db";
+import {
+  buildDimensionScores,
+  buildOverallScore,
+} from "./stats-constants";
 
 let activeAgents = 0;
 const MAX_AGENTS = 5;
@@ -43,20 +47,31 @@ export async function processHomework(homeworkId: number, content: string) {
     void content;
 
     await new Promise((resolve) => setTimeout(resolve, 2000));
+    const overallScore = buildOverallScore(homeworkId);
+    const dimensionScores = buildDimensionScores(homeworkId);
     const parsed = {
       feedback_content:
         "这份作业充满了真诚与反思，能深切感受到你在转型期的思考与决心。保持积极的心态，一人公司的路虽然充满挑战，但也意味着无限的可能！\n\n**建议：**\n1. 尝试在第二段中加入一个具体的、甚至有些痛苦的小故事，这样能立刻拉近与潜在客户的心理距离（他们也有相似的痛）。\n2. 结尾处可以更加笃定一些，给出你的核心交付价值（比如你会如何帮助别人）。",
       is_low_quality: false,
+      overall_score: overallScore,
+      dimension_scores: JSON.stringify(dimensionScores),
     };
 
     db.prepare(
-      "INSERT INTO opc_ai_feedbacks (homework_id, feedback_content, is_low_quality) VALUES (?, ?, ?)",
-    ).run(homeworkId, parsed.feedback_content, parsed.is_low_quality ? 1 : 0);
-
-    db.prepare("UPDATE opc_homework_records SET status = ? WHERE id = ?").run(
-      "PENDING_AUDIT",
+      `INSERT INTO opc_ai_feedbacks
+       (homework_id, feedback_content, is_low_quality, overall_score, dimension_scores)
+       VALUES (?, ?, ?, ?, ?)`,
+    ).run(
       homeworkId,
+      parsed.feedback_content,
+      parsed.is_low_quality ? 1 : 0,
+      parsed.overall_score,
+      parsed.dimension_scores,
     );
+
+    db.prepare(
+      `UPDATE opc_homework_records SET status = ?, pending_audit_at = CURRENT_TIMESTAMP WHERE id = ?`,
+    ).run("PENDING_AUDIT", homeworkId);
   } catch (err) {
     console.error("Agent processing error:", err);
     resultState = "FAILED";

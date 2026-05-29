@@ -6,10 +6,11 @@ export const runtime = "nodejs";
 
 type Params = { params: Promise<{ id: string }> };
 
-export async function GET(_request: NextRequest, { params }: Params) {
+export async function GET(request: NextRequest, { params }: Params) {
   getDb();
   const { id } = await params;
-  return getHomeworkById(id);
+  const role = request.nextUrl.searchParams.get("role");
+  return getHomeworkById(id, role);
 }
 
 export async function PUT(request: NextRequest, { params }: Params) {

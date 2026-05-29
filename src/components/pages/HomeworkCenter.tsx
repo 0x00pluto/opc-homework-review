@@ -64,7 +64,14 @@ export function HomeworkCenter() {
                   {format(new Date(hw.submission_time), "yyyy-MM-dd HH:mm")}
                 </td>
                 <td className="px-6 py-4">
-                  <StatusBadge status={hw.status} />
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <StatusBadge status={hw.status} />
+                    {(hw.is_late === 1 || hw.is_late === true) && (
+                      <span className="px-2 py-0.5 text-xs font-medium rounded-full bg-orange-100 text-orange-700 border border-orange-200">
+                        逾期
+                      </span>
+                    )}
+                  </div>
                 </td>
                 <td className="px-6 py-4 text-right">
                   {hw.status !== "WAITING_REVIEW" &&
@@ -113,6 +120,7 @@ function StatusBadge({ status }: { status: string }) {
     PROCESSING: { label: "AI批阅中", cn: "bg-blue-100 text-blue-700" },
     PENDING_AUDIT: { label: "等待审核", cn: "bg-amber-100 text-amber-700" },
     COMPLETED: { label: "已发布", cn: "bg-emerald-100 text-emerald-700" },
+    MODIFIED: { label: "已修改", cn: "bg-purple-100 text-purple-700" },
   };
   const ui = config[status] || { label: status, cn: "bg-gray-100" };
 

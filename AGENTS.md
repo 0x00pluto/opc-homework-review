@@ -22,7 +22,9 @@
 src/
 ├── app/
 │   ├── layout.tsx              # 根布局，挂载 AuthProvider
-│   ├── login/page.tsx          # 登录页（学员 / 讲师）
+│   ├── login/page.tsx          # 登录入口（选择学员 / 讲师）
+│   ├── login/student/page.tsx  # 学员登录
+│   ├── login/instructor/page.tsx # 讲师登录
 │   ├── (app)/                  # 需登录的业务路由组
 │   │   ├── layout.tsx          # AppShell：角色路由守卫
 │   │   ├── page.tsx            # 首页（学员→StudentDashboard，讲师→Dashboard）
@@ -31,7 +33,9 @@ src/
 │   │   ├── kb/                 # 知识库管理
 │   │   ├── cohorts/            # 班级管理
 │   │   ├── students-mgmt/      # 学员管理
-│   │   └── crm/                # 学员画像及学习进展
+│   │   ├── crm/                # 学员画像及学习进展
+│   │   ├── growth/             # 学员成长轨迹（历史/趋势/雷达）
+│   │   └── workload/           # 讲师工作量统计
 │   └── api/                    # Route Handlers（均 runtime = "nodejs"）
 ├── components/
 │   ├── AppShell.tsx            # 认证守卫 + 讲师侧栏布局
@@ -52,7 +56,7 @@ demo/                           # 原 AI Studio 原型，不参与构建（tscon
 
 ## 角色与路由
 
-- **学员（student）**：登录后仅可访问 `/`（StudentDashboard）；`/homeworks` 及讲师专属路径会被 AppShell 重定向。
+- **学员（student）**：登录后可访问 `/`（StudentDashboard）、`/growth`（成长轨迹）；`/homeworks` 及讲师专属路径（含 `/workload`）会被 AppShell 重定向。
 - **讲师（instructor）**：可访问全部 `(app)` 路由，带 InstructorSidebar 布局。
 - **认证**：前端 `AuthContext` + `localStorage`（`opc_role` / `opc_uid`）；学员登录走 `POST /api/students/login`，讲师为演示模式直接前端写入。
 
@@ -82,8 +86,14 @@ PROCESSING → 生成 opc_ai_feedbacks → PENDING_AUDIT
 
 | 路径前缀 | 用途 |
 |----------|------|
-| `/api/homeworks` | 作业 CRUD、按学员查询、发布 / 重触发 |
-| `/api/assignments` | 作业库（题目） |
+| `/api/homeworks` | 作业 CRUD、按学员查询、发布 / 重触发；POST 支持 `attachments`、截止校验与 `is_late`；`publish`/`retrigger` 支持 body `{ instructor_id }` 写入审核事件 |
+| `/api/students/[student_id]/growth` | `GET` 学员成长轨迹（历史、得分趋势、能力雷达、自动建议） |
+| `/api/instructors/[instructor_id]/workload` | `GET` 讲师本周工作量（审核数、平均时长、打回率） |
+| `/api/homeworks/[id]/feedback` | `PATCH` 保存讲师人工批注（`instructor_notes`） |
+| `/api/assignments` | 作业库（题目）列表与创建；含 `deadline_at`（默认当天 20:00）、`allow_late_submit` |
+| `/api/assignments/[id]` | `PATCH` 更新题目、`DELETE` 删除（有提交记录时拒绝） |
+| `/api/uploads` | `POST` multipart 上传作业附件（PDF/Word/Excel/图片，最大 10MB） |
+| `/api/uploads/[filename]` | `GET` 下载附件 |
 | `/api/students` | 学员 CRUD、登录、排名 |
 | `/api/cohorts` | 班级 CRUD |
 | `/api/knowledge-base` | 知识库 |
@@ -93,6 +103,7 @@ PROCESSING → 生成 opc_ai_feedbacks → PENDING_AUDIT
 
 - 默认路径：`db_data/opc_homework.db`，可通过环境变量 `DATABASE_PATH` 覆盖。
 - 表前缀 `opc_`（业务表）与 `sys_`（系统日志）；schema 在 `initDb()` 中自动创建，含增量 `ALTER TABLE` 兼容。
+- 统计相关：`opc_ai_feedbacks.overall_score` / `dimension_scores`；`opc_homework_records.pending_audit_at` / `published_at` / `reviewed_by`；`opc_review_events`（讲师 publish/retrigger 埋点）。
 - **禁止**在 Client Component 中直接访问 `getDb()`；仅 Server Route / `lib/` 服务端模块可用。
 - `next.config.ts` 已配置 `serverExternalPackages: ["better-sqlite3"]`。
 

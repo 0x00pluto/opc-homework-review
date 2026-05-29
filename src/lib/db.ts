@@ -74,6 +74,82 @@ export function initDb() {
     // column exists
   }
 
+  try {
+    db.exec(`ALTER TABLE opc_assignments ADD COLUMN deadline_at DATETIME`);
+  } catch {
+    // column exists
+  }
+
+  try {
+    db.exec(
+      `ALTER TABLE opc_assignments ADD COLUMN allow_late_submit INTEGER DEFAULT 1`,
+    );
+  } catch {
+    // column exists
+  }
+
+  try {
+    db.exec(
+      `ALTER TABLE opc_homework_records ADD COLUMN is_late INTEGER DEFAULT 0`,
+    );
+  } catch {
+    // column exists
+  }
+
+  try {
+    db.exec(
+      `ALTER TABLE opc_homework_records ADD COLUMN attachments TEXT DEFAULT '[]'`,
+    );
+  } catch {
+    // column exists
+  }
+
+  try {
+    db.exec(
+      `ALTER TABLE opc_ai_feedbacks ADD COLUMN instructor_notes TEXT DEFAULT ''`,
+    );
+  } catch {
+    // column exists
+  }
+
+  try {
+    db.exec(`ALTER TABLE opc_ai_feedbacks ADD COLUMN overall_score INTEGER`);
+  } catch {
+    // column exists
+  }
+
+  try {
+    db.exec(
+      `ALTER TABLE opc_ai_feedbacks ADD COLUMN dimension_scores TEXT DEFAULT '{}'`,
+    );
+  } catch {
+    // column exists
+  }
+
+  try {
+    db.exec(
+      `ALTER TABLE opc_homework_records ADD COLUMN pending_audit_at DATETIME`,
+    );
+  } catch {
+    // column exists
+  }
+
+  try {
+    db.exec(
+      `ALTER TABLE opc_homework_records ADD COLUMN published_at DATETIME`,
+    );
+  } catch {
+    // column exists
+  }
+
+  try {
+    db.exec(
+      `ALTER TABLE opc_homework_records ADD COLUMN reviewed_by TEXT`,
+    );
+  } catch {
+    // column exists
+  }
+
   db.exec(`
     CREATE TABLE IF NOT EXISTS opc_knowledge_base (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -113,6 +189,15 @@ export function initDb() {
       execution_time INTEGER,
       result_state TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS opc_review_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      instructor_id TEXT NOT NULL,
+      homework_id INTEGER NOT NULL,
+      action TEXT NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY(homework_id) REFERENCES opc_homework_records(id)
     );
   `);
 
