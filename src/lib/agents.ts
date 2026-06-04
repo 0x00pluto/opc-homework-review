@@ -1,11 +1,11 @@
-import { getDb } from "./db";
+import { dbRun } from "./db-query";
 import {
   buildDimensionScores,
   buildOverallScore,
 } from "./stats-constants";
 
 let activeAgents = 0;
-const MAX_AGENTS = 5;
+export const MAX_AGENTS = 5;
 
 export async function getActiveAgentsCount() {
   return activeAgents;
@@ -25,8 +25,6 @@ const DAY2_TASK = `
 `;
 
 export async function processHomework(homeworkId: number, content: string) {
-  const db = getDb();
-
   if (activeAgents >= MAX_AGENTS) {
     throw new Error("All agents are busy. Task queued.");
   }
@@ -35,13 +33,12 @@ export async function processHomework(homeworkId: number, content: string) {
   const startTime = Date.now();
   let resultState = "SUCCESS";
 
-  db.prepare("UPDATE opc_homework_records SET status = ? WHERE id = ?").run(
+  await dbRun("UPDATE opc_homework_records SET status = ? WHERE id = ?", [
     "PROCESSING",
     homeworkId,
-  );
+  ]);
 
   try {
-    // MOCK API CALL — prompt built for future Gemini integration
     void OPC_MANUAL;
     void DAY2_TASK;
     void content;
@@ -57,59 +54,36 @@ export async function processHomework(homeworkId: number, content: string) {
       dimension_scores: JSON.stringify(dimensionScores),
     };
 
-    db.prepare(
+    await dbRun(
       `INSERT INTO opc_ai_feedbacks
        (homework_id, feedback_content, is_low_quality, overall_score, dimension_scores)
        VALUES (?, ?, ?, ?, ?)`,
-    ).run(
-      homeworkId,
-      parsed.feedback_content,
-      parsed.is_low_quality ? 1 : 0,
-      parsed.overall_score,
-      parsed.dimension_scores,
+      [
+        homeworkId,
+        parsed.feedback_content,
+        parsed.is_low_quality ? 1 : 0,
+        parsed.overall_score,
+        parsed.dimension_scores,
+      ],
     );
 
-    db.prepare(
+    await dbRun(
       `UPDATE opc_homework_records SET status = ?, pending_audit_at = CURRENT_TIMESTAMP WHERE id = ?`,
-    ).run("PENDING_AUDIT", homeworkId);
+      ["PENDING_AUDIT", homeworkId],
+    );
   } catch (err) {
     console.error("Agent processing error:", err);
     resultState = "FAILED";
-    db.prepare("UPDATE opc_homework_records SET status = ? WHERE id = ?").run(
+    await dbRun("UPDATE opc_homework_records SET status = ? WHERE id = ?", [
       "WAITING_REVIEW",
       homeworkId,
-    );
+    ]);
   } finally {
     const executionTime = Date.now() - startTime;
-    db.prepare(
+    await dbRun(
       "INSERT INTO sys_agent_logs (agent_thread_id, target_homework_id, execution_time, result_state) VALUES (?, ?, ?, ?)",
-    ).run(activeAgents, homeworkId, executionTime, resultState);
+      [activeAgents, homeworkId, executionTime, resultState],
+    );
     activeAgents--;
   }
-}
-
-let isPolling = false;
-
-export async function startPollingAgents() {
-  if (isPolling) return;
-  isPolling = true;
-
-  setInterval(async () => {
-    if (activeAgents >= MAX_AGENTS) return;
-
-    try {
-      const db = getDb();
-      const waiting = db
-        .prepare(
-          "SELECT id, homework_link FROM opc_homework_records WHERE status = 'WAITING_REVIEW' ORDER BY submission_time ASC LIMIT 1",
-        )
-        .get() as { id: number; homework_link: string } | undefined;
-
-      if (waiting) {
-        processHomework(waiting.id, waiting.homework_link).catch(console.error);
-      }
-    } catch (e) {
-      console.error("Polling error", e);
-    }
-  }, 3000);
 }

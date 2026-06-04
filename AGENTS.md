@@ -1,6 +1,6 @@
 # AI 作业智能评审与反馈系统（OPC 评审系统）
 
-面向「一人公司超级个体训练营」的作业提交、AI 智能评审与教务管理 Web 应用。学员提交作业后由后台 Agent 轮询处理并生成反馈，讲师可在后台审核、发布与管理教务数据。
+面向「一人公司超级个体训练营」的作业提交、AI 智能评审与教务管理 Web 应用。学员提交作业后由后台 Agent 处理并生成反馈，讲师可在后台审核、发布与管理教务数据。
 
 团队 Cursor 命令见 `.cursor/commands/team/`（如 `/team:front-enginer`）；母版维护于 Obsidian Vibecoding 团队成员目录。
 
@@ -11,7 +11,8 @@
 | 框架 | Next.js 16（App Router）、React 19 |
 | 语言 | TypeScript（strict） |
 | 样式 | Tailwind CSS 4、`clsx` + `tailwind-merge` |
-| 数据库 | SQLite（`better-sqlite3`，本地文件） |
+| 数据库 | Turso（libSQL，`@libsql/client`） |
+| 附件存储 | Vercel Blob（`@vercel/blob`） |
 | 图表 | Recharts |
 | 图标 | lucide-react |
 | 包管理 | pnpm |
@@ -22,36 +23,24 @@
 src/
 ├── app/
 │   ├── layout.tsx              # 根布局，挂载 AuthProvider
-│   ├── login/page.tsx          # 登录入口（选择学员 / 讲师）
-│   ├── login/student/page.tsx  # 学员登录
-│   ├── login/instructor/page.tsx # 讲师登录
+│   ├── login/                  # 登录入口
 │   ├── (app)/                  # 需登录的业务路由组
-│   │   ├── layout.tsx          # AppShell：角色路由守卫
-│   │   ├── page.tsx            # 首页（学员→StudentDashboard，讲师→Dashboard）
-│   │   ├── homeworks/          # 作业大厅 & 详情
-│   │   ├── assignments/        # 作业库（题目）管理
-│   │   ├── kb/                 # 知识库管理
-│   │   ├── cohorts/            # 班级管理
-│   │   ├── students-mgmt/      # 学员管理
-│   │   ├── crm/                # 学员画像及学习进展
-│   │   ├── growth/             # 学员成长轨迹（历史/趋势/雷达）
-│   │   └── workload/           # 讲师工作量统计
 │   └── api/                    # Route Handlers（均 runtime = "nodejs"）
+│       └── cron/process-homework/  # Vercel Cron 兜底处理 WAITING_REVIEW
 ├── components/
-│   ├── AppShell.tsx            # 认证守卫 + 讲师侧栏布局
-│   ├── Layout.tsx              # InstructorSidebar、Layout 壳
-│   ├── HomePage.tsx            # 按角色分发首页
-│   └── pages/                  # 各页面业务组件（Client Component）
-├── context/AuthContext.tsx     # 角色与 userId（localStorage 持久化）
+├── context/AuthContext.tsx
 ├── lib/
-│   ├── db.ts                   # SQLite 初始化、表结构、getDb()
-│   ├── api-handlers.ts         # API 业务逻辑（供 route.ts 调用）
-│   ├── agents.ts               # AI Agent 轮询与作业处理
-│   └── utils.ts                # cn() 等工具
-├── types.ts                    # 共享类型定义
-└── instrumentation.ts          # 启动时 initDb + startPollingAgents
-db_data/opc_homework.db         # 默认 SQLite 文件（gitignore）
-demo/                           # 原 AI Studio 原型，不参与构建（tsconfig exclude）
+│   ├── db.ts                   # Turso 客户端单例、ensureDb()
+│   ├── db-query.ts             # dbAll / dbOne / dbRun 异步查询
+│   ├── api-handlers.ts         # API 业务逻辑
+│   ├── agents.ts               # AI Agent 作业处理（Mock）
+│   ├── agent-queue.ts          # 提交触发与 Cron 批量 dequeue
+│   └── uploads.ts              # Vercel Blob 上传
+├── types.ts
+└── instrumentation.ts          # 启动时 ensureDb()
+db/migrations/                  # DDL 单一事实源（Turso，见 docs/db-migrations.md）
+supabase/migrations/            # 迁 Supabase 后使用（Postgres）
+demo/                           # 历史原型，不参与构建
 ```
 
 ## 角色与路由
@@ -60,14 +49,12 @@ demo/                           # 原 AI Studio 原型，不参与构建（tscon
 - **讲师（instructor）**：可访问全部 `(app)` 路由，带 InstructorSidebar 布局。
 - **认证**：前端 `AuthContext` + `localStorage`（`opc_role` / `opc_uid`）；学员登录走 `POST /api/students/login`，讲师为演示模式直接前端写入。
 
-讲师侧栏路径见 `src/components/Layout.tsx` 中 `navGroups`。
-
 ## 核心业务流
 
 ```
 学员提交作业 → opc_homework_records（WAITING_REVIEW）
       ↓
-Agent 轮询（agents.ts，3s 间隔，最多 5 并发）
+waitUntil 立即触发 + Vercel Cron 每分钟兜底（agent-queue.ts）
       ↓
 PROCESSING → 生成 opc_ai_feedbacks → PENDING_AUDIT
       ↓
@@ -76,54 +63,64 @@ PROCESSING → 生成 opc_ai_feedbacks → PENDING_AUDIT
 
 **作业状态枚举**（`types.ts`）：`WAITING_REVIEW` | `PROCESSING` | `PENDING_AUDIT` | `COMPLETED` | `MODIFIED`
 
-**AI Agent**：当前为 **Mock 实现**（`agents.ts` 内 `setTimeout` + 固定反馈文案），已预留 OPC 手册与任务说明常量，后续可接入 Gemini（`.env.example` 中的 `GEMINI_API_KEY`）。Agent 在 `instrumentation.ts` 与 `getDb()` 首次调用时启动轮询。
+**AI Agent**：当前为 **Mock 实现**（`agents.ts` 内 `setTimeout` + 固定反馈文案），后续可接入 Gemini（`GEMINI_API_KEY`）。
 
 ## API 约定
 
-- 所有 Route Handler 位于 `src/app/api/**/route.ts`，**必须**声明 `export const runtime = "nodejs"`（SQLite 原生模块依赖 Node 运行时）。
-- 业务逻辑集中在 `src/lib/api-handlers.ts`，route 文件只做 HTTP 适配（解析 body / params → 调用 handler → 返回 JSON）。
-- 新增 API 时遵循现有命名：`GET` 列表、`POST` 创建、`PATCH`/`PUT` 更新、`DELETE` 删除；错误返回 `{ error: string }` + 合适 status。
+- 所有 Route Handler **必须**声明 `export const runtime = "nodejs"`。
+- 业务逻辑集中在 `src/lib/api-handlers.ts`；route 内先 `await ensureDb()` 再调用 handler。
+- 错误返回 `{ error: string }` + 合适 status。
 
 | 路径前缀 | 用途 |
 |----------|------|
-| `/api/homeworks` | 作业 CRUD、按学员查询、发布 / 重触发；POST 支持 `attachments`、截止校验与 `is_late`；`publish`/`retrigger` 支持 body `{ instructor_id }` 写入审核事件 |
-| `/api/students/[student_id]/growth` | `GET` 学员成长轨迹（历史、得分趋势、能力雷达、自动建议） |
-| `/api/instructors/[instructor_id]/workload` | `GET` 讲师本周工作量（审核数、平均时长、打回率） |
-| `/api/homeworks/[id]/feedback` | `PATCH` 保存讲师人工批注（`instructor_notes`） |
-| `/api/assignments` | 作业库（题目）列表与创建；含 `deadline_at`（默认当天 20:00）、`allow_late_submit` |
-| `/api/assignments/[id]` | `PATCH` 更新题目、`DELETE` 删除（有提交记录时拒绝） |
-| `/api/uploads` | `POST` multipart 上传作业附件（PDF/Word/Excel/图片，最大 10MB） |
-| `/api/uploads/[filename]` | `GET` 下载附件 |
-| `/api/students` | 学员 CRUD、登录、排名 |
-| `/api/cohorts` | 班级 CRUD |
-| `/api/knowledge-base` | 知识库 |
-| `/api/agents/status` | Agent 运行状态与日志 |
+| `/api/homeworks` | 作业 CRUD、发布 / 重触发 |
+| `/api/cron/process-homework` | Cron 鉴权后批量处理 WAITING_REVIEW |
+| `/api/uploads` | Blob 上传；`/api/uploads/[filename]` 代理下载 |
+| 其余 | 学员、班级、题目、知识库、Agent 状态等（见原表） |
 
-## 数据库
+## 数据库（Turso）
 
-- 默认路径：`db_data/opc_homework.db`，可通过环境变量 `DATABASE_PATH` 覆盖。
-- 表前缀 `opc_`（业务表）与 `sys_`（系统日志）；schema 在 `initDb()` 中自动创建，含增量 `ALTER TABLE` 兼容。
-- 统计相关：`opc_ai_feedbacks.overall_score` / `dimension_scores`；`opc_homework_records.pending_audit_at` / `published_at` / `reviewed_by`；`opc_review_events`（讲师 publish/retrigger 埋点）。
-- **禁止**在 Client Component 中直接访问 `getDb()`；仅 Server Route / `lib/` 服务端模块可用。
-- `next.config.ts` 已配置 `serverExternalPackages: ["better-sqlite3"]`。
-
-首次运行若 SQLite 原生模块未编译，`instrumentation.ts` 会打印 rebuild 指引：
+- **Migration 单一事实源**：[`db/migrations/`](db/migrations/)，流程见 [`docs/db-migrations.md`](docs/db-migrations.md)（对齐团队 Supabase 迁移最佳实践，当前用 Turso 执行）。
+- **常用命令**：
 
 ```bash
-pnpm approve-builds better-sqlite3   # 若 pnpm 提示需批准构建脚本
-pnpm rebuild better-sqlite3
+pnpm db:migration:new -- <name>   # 新建迁移文件（UTC 时间戳）
+pnpm db:migration:list            # 本地文件 vs 已应用版本
+pnpm db:migrate                   # 应用到当前 TURSO_DATABASE_URL
+pnpm db:seed                    # 开发种子（db/seed/dev.sql，幂等）
 ```
+
+- `pnpm dev` 前会通过 `predev` 自动执行 `db:migrate`（仅应用未执行的文件）。
+- **本地开发**（`.env.local`）：`TURSO_DATABASE_URL=file:./db_data/opc_homework.db`（无需 Token）。
+- **生产 / Vercel**：部署前对目标库执行 `pnpm db:migrate`；应用运行时**不会**自动建表。
+- 迁 **Supabase** 后：DDL 改到 `supabase/migrations/`，用 Supabase CLI `db push`，勿改写已发布的 Turso 历史文件。
+- 查询通过 `db-query.ts`；**禁止**在 Client Component 中访问数据库。
+
+## Vercel 部署检查清单
+
+1. 安装依赖（见下方命令）并关联 Turso / Blob 集成。
+2. 环境变量：`TURSO_DATABASE_URL`、`TURSO_AUTH_TOKEN`、`BLOB_READ_WRITE_TOKEN`、`CRON_SECRET`。
+3. 对远程库执行 `pnpm db:migrate`。
+4. Deploy 后验证：学员登录 → 提交作业 → 状态变为 `PENDING_AUDIT`（即时或 1 分钟内 Cron）。
+
+`vercel.json` 已配置 Cron：`/api/cron/process-homework`（每分钟）。
 
 ## 开发命令
 
 ```bash
-pnpm dev      # 开发服务器 http://localhost:3000
-pnpm build    # 生产构建
-pnpm start    # 生产启动
-pnpm lint     # ESLint
+pnpm dev
+pnpm build
+pnpm start
+pnpm lint
 ```
 
-依赖安装与包变更由开发者本地手动执行（Agent 不要自动跑 `pnpm install` / `pnpm add`）。
+**依赖变更后请在本机执行：**
+
+```bash
+pnpm add @libsql/client @vercel/blob @vercel/functions
+pnpm remove better-sqlite3 @types/better-sqlite3
+pnpm install
+```
 
 ## 环境变量
 
@@ -131,19 +128,20 @@ pnpm lint     # ESLint
 
 | 变量 | 说明 |
 |------|------|
-| `GEMINI_API_KEY` | Gemini API（当前 Mock 可不填） |
-| `DATABASE_PATH` | SQLite 路径，默认 `./db_data/opc_homework.db` |
+| `GEMINI_API_KEY` | Gemini API（Mock 可不填） |
+| `TURSO_DATABASE_URL` | Turso 或 `file:./db_data/...` |
+| `TURSO_AUTH_TOKEN` | 远程 Turso 必填 |
+| `BLOB_READ_WRITE_TOKEN` | Vercel Blob |
+| `CRON_SECRET` | Cron 路由 Bearer 鉴权 |
 
 ## 编码规范
 
 - 路径别名 `@/*` → `src/*`。
-- 页面路由文件（`app/**/page.tsx`）保持精简，复杂 UI 放到 `components/pages/`。
+- 页面路由保持精简，复杂 UI 放 `components/pages/`。
 - 新增共享类型写入 `src/types.ts`。
-- Client Component 文件顶部加 `"use client"`；需要服务端数据的页面优先通过 API fetch，不在客户端引 db。
+- Client Component 通过 API 取数，不直接引 db。
 - UI 文案与注释使用中文；变量 / 函数名使用英文。
-- 样式用 Tailwind utility class；合并类名用 `cn()` from `@/lib/utils`。
-- 遵循 KISS：复用 `api-handlers.ts` 与现有组件模式，避免过度抽象。
-- `demo/` 为历史原型，修改主应用时不要依赖或同步该目录。
+- `demo/` 不参与主应用构建。
 
 <!-- BEGIN:nextjs-agent-rules -->
 ## Next.js 16

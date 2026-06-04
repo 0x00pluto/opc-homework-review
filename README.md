@@ -6,32 +6,38 @@
 
 - **学员端**：提交作业（文本 / 附件）、查看 AI 与讲师反馈、成长轨迹与排名
 - **讲师端**：作业大厅、AI 反馈审核与发布、作业库 / 班级 / 学员 / 知识库管理、工作量统计
-- **AI Agent**：后台轮询处理待评审作业（当前为 Mock，可接入 Gemini）
+- **AI Agent**：提交后即时处理 + Cron 兜底（当前为 Mock，可接入 Gemini）
 
 ## 技术栈
 
-Next.js 16 · React 19 · TypeScript · Tailwind CSS 4 · SQLite（better-sqlite3）
+Next.js 16 · React 19 · TypeScript · Tailwind CSS 4 · Turso（libSQL）· Vercel Blob
 
 ## 快速开始
 
 ```bash
 pnpm install
-cp .env.example .env.local   # 可选，Mock 模式可不填 GEMINI_API_KEY
+pnpm add @libsql/client @vercel/blob @vercel/functions
+pnpm remove better-sqlite3 @types/better-sqlite3
+cp .env.example .env.local
 pnpm dev
 ```
 
-浏览器打开 [http://localhost:3000](http://localhost:3000)，在登录页选择学员或讲师入口。
-
-首次运行若 SQLite 原生模块报错，在本机执行：
+本地开发可在 `.env.local` 使用嵌入式数据库（无需 Turso Token）：
 
 ```bash
-pnpm approve-builds better-sqlite3   # 若 pnpm 提示需批准构建脚本
-pnpm rebuild better-sqlite3
+TURSO_DATABASE_URL=file:./db_data/opc_homework.db
+pnpm db:migrate    # 首次或拉代码后应用 db/migrations/
+pnpm db:seed       # 可选：写入演示班级与学员 stu_001
+pnpm dev           # predev 也会自动 migrate
 ```
+
+数据库结构以 **`db/migrations/`** 为准（详见 [`docs/db-migrations.md`](docs/db-migrations.md)）。
+
+浏览器打开 [http://localhost:3000](http://localhost:3000)，在登录页选择学员或讲师入口。
 
 ## 测试账号
 
-> 数据库首次启动**不会**预置学员，需先由讲师端录入（或使用已有 `db_data/opc_homework.db`）。
+> 执行 `pnpm db:seed` 可预置演示班级与学员；否则需由讲师端录入。
 
 | 角色 | 登录地址 | 账号 | 密码 | 说明 |
 |------|----------|------|------|------|
@@ -54,7 +60,10 @@ pnpm rebuild better-sqlite3
 | 变量 | 说明 |
 |------|------|
 | `GEMINI_API_KEY` | Gemini API（当前 Mock 可不填） |
-| `DATABASE_PATH` | SQLite 路径，默认 `./db_data/opc_homework.db` |
+| `TURSO_DATABASE_URL` | Turso 或 `file:./db_data/opc_homework.db` |
+| `TURSO_AUTH_TOKEN` | 远程 Turso 必填 |
+| `BLOB_READ_WRITE_TOKEN` | 本地附件上传需配置（可用 Vercel Blob CLI） |
+| `CRON_SECRET` | 生产 Cron 鉴权 |
 
 ## 常用命令
 

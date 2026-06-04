@@ -12,6 +12,7 @@ export interface HomeworkAttachment {
   stored_name: string;
   mime_type: string;
   size: number;
+  url?: string;
 }
 
 export interface Assignment {

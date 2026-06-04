@@ -1,0 +1,1 @@
+# 迁到 Supabase 后，Postgres migration 放于此目录（见 docs/db-migrations.md）。

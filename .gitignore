@@ -70,3 +70,6 @@ next-env.d.ts
 /demo
 
 .cursor/
+
+# Supabase migration sync 临时备份（见团队 Supabase 最佳实践 §2.14）
+.migration-sync-backup/

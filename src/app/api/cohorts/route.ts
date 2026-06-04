@@ -1,16 +1,16 @@
 import { NextRequest } from "next/server";
 import { createCohort, listCohorts } from "@/lib/api-handlers";
-import { getDb } from "@/lib/db";
+import { ensureDb } from "@/lib/db";
 
 export const runtime = "nodejs";
 
 export async function GET() {
-  getDb();
-  return listCohorts();
+  await ensureDb();
+  return await listCohorts();
 }
 
 export async function POST(request: NextRequest) {
-  getDb();
+  await ensureDb();
   const body = await request.json();
-  return createCohort(body);
+  return await createCohort(body);
 }

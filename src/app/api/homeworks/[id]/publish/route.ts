@@ -1,12 +1,12 @@
 import { publishHomework } from "@/lib/api-handlers";
-import { getDb } from "@/lib/db";
+import { ensureDb } from "@/lib/db";
 
 export const runtime = "nodejs";
 
 type Params = { params: Promise<{ id: string }> };
 
 export async function POST(request: Request, { params }: Params) {
-  getDb();
+  await ensureDb();
   const { id } = await params;
   let body: { instructor_id?: string } = {};
   try {
@@ -14,5 +14,5 @@ export async function POST(request: Request, { params }: Params) {
   } catch {
     // empty body allowed
   }
-  return publishHomework(id, body);
+  return await publishHomework(id, body);
 }

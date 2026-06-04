@@ -3,17 +3,17 @@ import {
   createKnowledgeBase,
   listKnowledgeBase,
 } from "@/lib/api-handlers";
-import { getDb } from "@/lib/db";
+import { ensureDb } from "@/lib/db";
 
 export const runtime = "nodejs";
 
 export async function GET() {
-  getDb();
-  return listKnowledgeBase();
+  await ensureDb();
+  return await listKnowledgeBase();
 }
 
 export async function POST(request: NextRequest) {
-  getDb();
+  await ensureDb();
   const body = await request.json();
-  return createKnowledgeBase(body);
+  return await createKnowledgeBase(body);
 }

@@ -3,18 +3,19 @@ import {
   createAssignment,
   getAssignments,
 } from "@/lib/api-handlers";
-import { getDb } from "@/lib/db";
+import { ensureDb } from "@/lib/db";
 
 export const runtime = "nodejs";
 
 export async function GET(request: NextRequest) {
-  getDb();
+  await ensureDb();
   const cohort = request.nextUrl.searchParams.get("cohort");
-  return NextResponse.json(getAssignments(cohort));
+  const data = await getAssignments(cohort);
+  return NextResponse.json(data);
 }
 
 export async function POST(request: NextRequest) {
-  getDb();
+  await ensureDb();
   const body = await request.json();
-  return createAssignment(body);
+  return await createAssignment(body);
 }

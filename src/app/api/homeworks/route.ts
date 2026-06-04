@@ -1,16 +1,16 @@
 import { NextRequest } from "next/server";
 import { createHomework, listHomeworks } from "@/lib/api-handlers";
-import { getDb } from "@/lib/db";
+import { ensureDb } from "@/lib/db";
 
 export const runtime = "nodejs";
 
 export async function GET() {
-  getDb();
-  return listHomeworks();
+  await ensureDb();
+  return await listHomeworks();
 }
 
 export async function POST(request: NextRequest) {
-  getDb();
+  await ensureDb();
   const body = await request.json();
-  return createHomework(body);
+  return await createHomework(body);
 }

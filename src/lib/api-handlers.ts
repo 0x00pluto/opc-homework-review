@@ -1,8 +1,17 @@
 import { NextResponse } from "next/server";
+import { waitUntil } from "@vercel/functions";
 import { endOfWeek, startOfWeek } from "date-fns";
 import { zhCN } from "date-fns/locale";
+import { enqueueHomeworkProcessing } from "@/lib/agent-queue";
 import { getActiveAgentsCount } from "@/lib/agents";
-import { getDb } from "@/lib/db";
+import {
+  dbAll,
+  dbLastInsertId,
+  dbOne,
+  dbRun,
+  isPrimaryKeyConstraintError,
+  isUniqueConstraintError,
+} from "@/lib/db-query";
 import {
   GROWTH_DIMENSIONS,
   SUGGESTION_TEMPLATES,
@@ -52,7 +61,9 @@ function checkSubmissionDeadline(assignment: {
     return { allowed: true, isLate: false };
   }
 
-  const allowLate = assignment.allow_late_submit !== 0 && assignment.allow_late_submit !== false;
+  const allowLate =
+    assignment.allow_late_submit !== 0 &&
+    assignment.allow_late_submit !== false;
   if (!allowLate) {
     return { allowed: false, isLate: false };
   }
@@ -60,21 +71,19 @@ function checkSubmissionDeadline(assignment: {
   return { allowed: true, isLate: true };
 }
 
-export function getAssignments(cohort?: string | null) {
-  const db = getDb();
+export async function getAssignments(cohort?: string | null) {
   if (cohort) {
-    return db
-      .prepare(
-        "SELECT * FROM opc_assignments WHERE cohort_name = ? OR cohort_name = '全员' OR cohort_name = '全服' ORDER BY created_at DESC",
-      )
-      .all(cohort);
+    return dbAll(
+      "SELECT * FROM opc_assignments WHERE cohort_name = ? OR cohort_name = '全员' OR cohort_name = '全服' ORDER BY created_at DESC",
+      [cohort],
+    );
   }
-  return db
-    .prepare("SELECT * FROM opc_assignments ORDER BY created_at DESC")
-    .all();
+  return dbAll(
+    "SELECT * FROM opc_assignments ORDER BY created_at DESC",
+  );
 }
 
-export function createAssignment(body: {
+export async function createAssignment(body: {
   title?: string;
   description?: string;
   cohort_name?: string;
@@ -86,20 +95,20 @@ export function createAssignment(body: {
   if (!title || !description) {
     return NextResponse.json({ error: "Missing data" }, { status: 400 });
   }
-  const db = getDb();
-  db.prepare(
+  await dbRun(
     "INSERT INTO opc_assignments (title, description, cohort_name, deadline_at, allow_late_submit) VALUES (?, ?, ?, ?, ?)",
-  ).run(
-    title,
-    description,
-    normalizeCohortName(cohort_name),
-    deadline_at || getDefaultDeadlineAt(),
-    allow_late_submit === false ? 0 : 1,
+    [
+      title,
+      description,
+      normalizeCohortName(cohort_name),
+      deadline_at || getDefaultDeadlineAt(),
+      allow_late_submit === false ? 0 : 1,
+    ],
   );
   return NextResponse.json({ success: true });
 }
 
-export function updateAssignment(
+export async function updateAssignment(
   id: string,
   body: {
     title?: string;
@@ -114,66 +123,63 @@ export function updateAssignment(
   if (!title || !description) {
     return NextResponse.json({ error: "Missing data" }, { status: 400 });
   }
-  const db = getDb();
-  const existing = db
-    .prepare("SELECT id FROM opc_assignments WHERE id = ?")
-    .get(id);
+  const existing = await dbOne<{ id: number }>(
+    "SELECT id FROM opc_assignments WHERE id = ?",
+    [id],
+  );
   if (!existing) {
     return NextResponse.json({ error: "作业不存在" }, { status: 404 });
   }
-  db.prepare(
+  await dbRun(
     `UPDATE opc_assignments SET title = ?, description = ?, cohort_name = ?,
      deadline_at = ?, allow_late_submit = ? WHERE id = ?`,
-  ).run(
-    title,
-    description,
-    normalizeCohortName(cohort_name),
-    deadline_at || getDefaultDeadlineAt(),
-    allow_late_submit === false ? 0 : 1,
-    id,
+    [
+      title,
+      description,
+      normalizeCohortName(cohort_name),
+      deadline_at || getDefaultDeadlineAt(),
+      allow_late_submit === false ? 0 : 1,
+      id,
+    ],
   );
   return NextResponse.json({ success: true });
 }
 
-export function deleteAssignment(id: string) {
-  const db = getDb();
-  const existing = db
-    .prepare("SELECT id FROM opc_assignments WHERE id = ?")
-    .get(id);
+export async function deleteAssignment(id: string) {
+  const existing = await dbOne<{ id: number }>(
+    "SELECT id FROM opc_assignments WHERE id = ?",
+    [id],
+  );
   if (!existing) {
     return NextResponse.json({ error: "作业不存在" }, { status: 404 });
   }
-  const submission = db
-    .prepare(
-      "SELECT COUNT(*) as c FROM opc_homework_records WHERE assignment_id = ?",
-    )
-    .get(id) as { c: number };
-  if (submission.c > 0) {
+  const submission = await dbOne<{ c: number }>(
+    "SELECT COUNT(*) as c FROM opc_homework_records WHERE assignment_id = ?",
+    [id],
+  );
+  if ((submission?.c ?? 0) > 0) {
     return NextResponse.json(
       { error: "已有学员提交，不可删除" },
       { status: 400 },
     );
   }
-  db.prepare("DELETE FROM opc_assignments WHERE id = ?").run(id);
+  await dbRun("DELETE FROM opc_assignments WHERE id = ?", [id]);
   return NextResponse.json({ success: true });
 }
 
-export function listHomeworks() {
-  const db = getDb();
-  const homeworks = db
-    .prepare(
-      `
+export async function listHomeworks() {
+  const homeworks = await dbAll(
+    `
     SELECT h.*, a.title as assignment_title 
     FROM opc_homework_records h 
     LEFT JOIN opc_assignments a ON h.assignment_id = a.id 
     ORDER BY h.submission_time DESC
   `,
-    )
-    .all();
+  );
   return NextResponse.json(homeworks);
 }
 
-export function createHomework(body: {
+export async function createHomework(body: {
   student_id?: string;
   content?: string;
   assignment_id?: number;
@@ -190,17 +196,16 @@ export function createHomework(body: {
     );
   }
 
-  const db = getDb();
   let isLate = 0;
 
   if (assignment_id) {
-    const assignment = db
-      .prepare(
-        "SELECT deadline_at, allow_late_submit FROM opc_assignments WHERE id = ?",
-      )
-      .get(assignment_id) as
-      | { deadline_at?: string | null; allow_late_submit?: number | boolean }
-      | undefined;
+    const assignment = await dbOne<{
+      deadline_at?: string | null;
+      allow_late_submit?: number | boolean;
+    }>(
+      "SELECT deadline_at, allow_late_submit FROM opc_assignments WHERE id = ?",
+      [assignment_id],
+    );
 
     if (assignment) {
       const deadlineCheck = checkSubmissionDeadline(assignment);
@@ -211,30 +216,37 @@ export function createHomework(body: {
     }
   }
 
-  db.prepare(
+  await dbRun(
     "INSERT INTO opc_homework_records (student_id, homework_link, assignment_id, is_late, attachments) VALUES (?, ?, ?, ?, ?)",
-  ).run(
-    student_id,
-    textContent,
-    assignment_id || null,
-    isLate,
-    serializeAttachments(attachmentList),
+    [
+      student_id,
+      textContent,
+      assignment_id || null,
+      isLate,
+      serializeAttachments(attachmentList),
+    ],
   );
+
+  const homeworkId = await dbLastInsertId();
+  waitUntil(
+    enqueueHomeworkProcessing(homeworkId).catch((err) =>
+      console.error("[OPC] Agent enqueue failed:", err),
+    ),
+  );
+
   return NextResponse.json({ success: true, is_late: isLate === 1 });
 }
 
-export function getHomeworkById(id: string, role?: string | null) {
-  const db = getDb();
-  const homework = db
-    .prepare(
-      `
+export async function getHomeworkById(id: string, role?: string | null) {
+  const homework = await dbOne<Record<string, unknown>>(
+    `
     SELECT h.*, a.title as assignment_title, a.deadline_at as assignment_deadline
     FROM opc_homework_records h
     LEFT JOIN opc_assignments a ON h.assignment_id = a.id
     WHERE h.id = ?
   `,
-    )
-    .get(id) as Record<string, unknown> | undefined;
+    [id],
+  );
 
   if (!homework) {
     return NextResponse.json({ error: "作业不存在" }, { status: 404 });
@@ -243,11 +255,10 @@ export function getHomeworkById(id: string, role?: string | null) {
   const attachments = parseAttachments(homework.attachments);
   const status = homework.status as string;
 
-  let feedback = db
-    .prepare(
-      "SELECT * FROM opc_ai_feedbacks WHERE homework_id = ? ORDER BY generation_time DESC",
-    )
-    .get(id) as Record<string, unknown> | undefined;
+  let feedback = await dbOne<Record<string, unknown>>(
+    "SELECT * FROM opc_ai_feedbacks WHERE homework_id = ? ORDER BY generation_time DESC",
+    [id],
+  );
 
   if (role === "student" && status !== "COMPLETED") {
     feedback = undefined;
@@ -259,7 +270,7 @@ export function getHomeworkById(id: string, role?: string | null) {
   });
 }
 
-export function updateHomeworkFeedback(
+export async function updateHomeworkFeedback(
   id: string,
   body: { instructor_notes?: string },
 ) {
@@ -267,50 +278,50 @@ export function updateHomeworkFeedback(
   if (instructor_notes === undefined) {
     return NextResponse.json({ error: "Missing data" }, { status: 400 });
   }
-  const db = getDb();
-  const feedback = db
-    .prepare(
-      "SELECT id FROM opc_ai_feedbacks WHERE homework_id = ? ORDER BY generation_time DESC LIMIT 1",
-    )
-    .get(id) as { id: number } | undefined;
+  const feedback = await dbOne<{ id: number }>(
+    "SELECT id FROM opc_ai_feedbacks WHERE homework_id = ? ORDER BY generation_time DESC LIMIT 1",
+    [id],
+  );
 
   if (!feedback) {
-    return NextResponse.json({ error: "暂无 AI 反馈，无法保存批注" }, { status: 404 });
+    return NextResponse.json(
+      { error: "暂无 AI 反馈，无法保存批注" },
+      { status: 404 },
+    );
   }
 
-  db.prepare(
-    "UPDATE opc_ai_feedbacks SET instructor_notes = ? WHERE id = ?",
-  ).run(instructor_notes, feedback.id);
+  await dbRun("UPDATE opc_ai_feedbacks SET instructor_notes = ? WHERE id = ?", [
+    instructor_notes,
+    feedback.id,
+  ]);
 
   return NextResponse.json({ success: true });
 }
 
-export function getHomeworksByStudent(studentId: string) {
-  const db = getDb();
-  const homeworks = db
-    .prepare(
-      `
+export async function getHomeworksByStudent(studentId: string) {
+  const homeworks = await dbAll(
+    `
     SELECT h.*, a.title as assignment_title
     FROM opc_homework_records h
     LEFT JOIN opc_assignments a ON h.assignment_id = a.id
     WHERE h.student_id = ?
     ORDER BY h.submission_time DESC
   `,
-    )
-    .all(studentId);
+    [studentId],
+  );
   return NextResponse.json(homeworks);
 }
 
-function insertReviewEvent(
+async function insertReviewEvent(
   instructorId: string | undefined,
   homeworkId: string,
   action: "publish" | "retrigger",
 ) {
   if (!instructorId) return;
-  const db = getDb();
-  db.prepare(
+  await dbRun(
     "INSERT INTO opc_review_events (instructor_id, homework_id, action) VALUES (?, ?, ?)",
-  ).run(instructorId, homeworkId, action);
+    [instructorId, homeworkId, action],
+  );
 }
 
 function getCurrentWeekRange() {
@@ -330,30 +341,31 @@ function parseDimensionScores(raw: unknown): Record<string, number> | null {
   }
 }
 
-export function publishHomework(
+export async function publishHomework(
   id: string,
   body: { instructor_id?: string } = {},
 ) {
   const { instructor_id } = body;
-  const db = getDb();
-  const existing = db
-    .prepare("SELECT id FROM opc_homework_records WHERE id = ?")
-    .get(id);
+  const existing = await dbOne<{ id: number }>(
+    "SELECT id FROM opc_homework_records WHERE id = ?",
+    [id],
+  );
   if (!existing) {
     return NextResponse.json({ error: "作业不存在" }, { status: 404 });
   }
 
-  db.prepare(
+  await dbRun(
     `UPDATE opc_homework_records
      SET status = ?, published_at = CURRENT_TIMESTAMP, reviewed_by = ?
      WHERE id = ?`,
-  ).run("COMPLETED", instructor_id ?? null, id);
+    ["COMPLETED", instructor_id ?? null, id],
+  );
 
-  insertReviewEvent(instructor_id, id, "publish");
+  await insertReviewEvent(instructor_id, id, "publish");
   return NextResponse.json({ success: true });
 }
 
-export function updateHomework(
+export async function updateHomework(
   id: string,
   body: { content?: string; attachments?: HomeworkAttachment[] },
 ) {
@@ -368,10 +380,13 @@ export function updateHomework(
     );
   }
 
-  const db = getDb();
-  const existing = db
-    .prepare("SELECT homework_link, attachments FROM opc_homework_records WHERE id = ?")
-    .get(id) as { homework_link: string; attachments?: string } | undefined;
+  const existing = await dbOne<{
+    homework_link: string;
+    attachments?: string;
+  }>(
+    "SELECT homework_link, attachments FROM opc_homework_records WHERE id = ?",
+    [id],
+  );
 
   if (!existing) {
     return NextResponse.json({ error: "作业不存在" }, { status: 404 });
@@ -381,47 +396,65 @@ export function updateHomework(
   const finalAttachments =
     attachmentList !== undefined
       ? serializeAttachments(attachmentList)
-      : existing.attachments ?? "[]";
+      : (existing.attachments ?? "[]");
 
-  db.prepare(
+  await dbRun(
     "UPDATE opc_homework_records SET homework_link = ?, attachments = ?, status = 'MODIFIED' WHERE id = ?",
-  ).run(finalContent, finalAttachments, id);
+    [finalContent, finalAttachments, id],
+  );
   return NextResponse.json({ success: true });
 }
 
-export function retriggerHomework(
+export async function retriggerHomework(
   id: string,
   body: { instructor_id?: string } = {},
 ) {
   const { instructor_id } = body;
-  const db = getDb();
-  const existing = db
-    .prepare("SELECT id FROM opc_homework_records WHERE id = ?")
-    .get(id);
+  const existing = await dbOne<{ id: number }>(
+    "SELECT id FROM opc_homework_records WHERE id = ?",
+    [id],
+  );
   if (!existing) {
     return NextResponse.json({ error: "作业不存在" }, { status: 404 });
   }
 
-  db.prepare(
+  await dbRun(
     "UPDATE opc_homework_records SET status = 'WAITING_REVIEW' WHERE id = ?",
-  ).run(id);
+    [id],
+  );
 
-  insertReviewEvent(instructor_id, id, "retrigger");
+  await insertReviewEvent(instructor_id, id, "retrigger");
+
+  const homeworkId = Number(id);
+  waitUntil(
+    enqueueHomeworkProcessing(homeworkId).catch((err) =>
+      console.error("[OPC] Agent retrigger failed:", err),
+    ),
+  );
+
   return NextResponse.json({ success: true });
 }
 
-export function getStudentGrowth(studentId: string) {
-  const db = getDb();
-  const student = db
-    .prepare("SELECT student_id FROM opc_students WHERE student_id = ?")
-    .get(studentId);
+export async function getStudentGrowth(studentId: string) {
+  const student = await dbOne<{ student_id: string }>(
+    "SELECT student_id FROM opc_students WHERE student_id = ?",
+    [studentId],
+  );
   if (!student) {
     return NextResponse.json({ error: "学员不存在" }, { status: 404 });
   }
 
-  const rows = db
-    .prepare(
-      `
+  const rows = await dbAll<{
+    id: number;
+    status: string;
+    submission_time: string;
+    published_at: string | null;
+    assignment_title: string | null;
+    overall_score: number | null;
+    dimension_scores: string | null;
+    generation_time: string | null;
+  }>(
+    `
     SELECT h.id, h.status, h.submission_time, h.published_at,
            a.title as assignment_title,
            f.overall_score, f.dimension_scores, f.generation_time
@@ -435,17 +468,8 @@ export function getStudentGrowth(studentId: string) {
     WHERE h.student_id = ?
     ORDER BY h.submission_time DESC
   `,
-    )
-    .all(studentId) as Array<{
-      id: number;
-      status: string;
-      submission_time: string;
-      published_at: string | null;
-      assignment_title: string | null;
-      overall_score: number | null;
-      dimension_scores: string | null;
-      generation_time: string | null;
-    }>;
+    [studentId],
+  );
 
   const history = rows.map((r) => ({
     id: r.id,
@@ -511,9 +535,7 @@ export function getStudentGrowth(studentId: string) {
             SUGGESTION_TEMPLATES[d.dimension] ||
             `建议加强「${d.dimension}」相关练习与复盘。`,
         )
-      : [
-          "完成更多作业并等待导师发布后，系统将自动生成能力提升建议。",
-        ];
+      : ["完成更多作业并等待导师发布后，系统将自动生成能力提升建议。"];
 
   return NextResponse.json({
     history,
@@ -523,37 +545,35 @@ export function getStudentGrowth(studentId: string) {
   });
 }
 
-export function getInstructorWorkload(instructorId: string) {
-  const db = getDb();
+export async function getInstructorWorkload(instructorId: string) {
   const { start, end } = getCurrentWeekRange();
   const startIso = start.toISOString();
   const endIso = end.toISOString();
 
-  const publishRow = db
-    .prepare(
-      `SELECT COUNT(*) as c FROM opc_review_events
+  const publishRow = await dbOne<{ c: number }>(
+    `SELECT COUNT(*) as c FROM opc_review_events
        WHERE instructor_id = ? AND action = 'publish'
        AND created_at >= ? AND created_at <= ?`,
-    )
-    .get(instructorId, startIso, endIso) as { c: number };
+    [instructorId, startIso, endIso],
+  );
 
-  const retriggerRow = db
-    .prepare(
-      `SELECT COUNT(*) as c FROM opc_review_events
+  const retriggerRow = await dbOne<{ c: number }>(
+    `SELECT COUNT(*) as c FROM opc_review_events
        WHERE instructor_id = ? AND action = 'retrigger'
        AND created_at >= ? AND created_at <= ?`,
-    )
-    .get(instructorId, startIso, endIso) as { c: number };
+    [instructorId, startIso, endIso],
+  );
 
-  const weeklyReviewedCount = publishRow.c;
-  const retriggerCount = retriggerRow.c;
+  const weeklyReviewedCount = publishRow?.c ?? 0;
+  const retriggerCount = retriggerRow?.c ?? 0;
   const denominator = weeklyReviewedCount + retriggerCount;
   const reReviewRatio =
-    denominator > 0 ? Math.round((retriggerCount / denominator) * 1000) / 1000 : 0;
+    denominator > 0
+      ? Math.round((retriggerCount / denominator) * 1000) / 1000
+      : 0;
 
-  const avgRow = db
-    .prepare(
-      `SELECT AVG(
+  const avgRow = await dbOne<{ avg_minutes: number | null }>(
+    `SELECT AVG(
          (julianday(published_at) - julianday(pending_audit_at)) * 24 * 60
        ) as avg_minutes
        FROM opc_homework_records
@@ -561,35 +581,32 @@ export function getInstructorWorkload(instructorId: string) {
          AND published_at IS NOT NULL
          AND pending_audit_at IS NOT NULL
          AND published_at >= ? AND published_at <= ?`,
-    )
-    .get(instructorId, startIso, endIso) as { avg_minutes: number | null };
+    [instructorId, startIso, endIso],
+  );
 
   const avgReviewDurationMinutes =
-    avgRow.avg_minutes != null
+    avgRow?.avg_minutes != null
       ? Math.round(avgRow.avg_minutes * 10) / 10
       : 0;
 
-  const multiRoundRow = db
-    .prepare(
-      `SELECT COUNT(DISTINCT homework_id) as multi_count
+  const multiRoundRow = await dbOne<{ multi_count: number }>(
+    `SELECT COUNT(DISTINCT homework_id) as multi_count
        FROM (
          SELECT homework_id, COUNT(*) as cnt
          FROM opc_ai_feedbacks
          GROUP BY homework_id
          HAVING cnt > 1
        )`,
-    )
-    .get() as { multi_count: number };
+  );
 
-  const totalPublishedRow = db
-    .prepare(
-      `SELECT COUNT(*) as c FROM opc_homework_records WHERE status = 'COMPLETED'`,
-    )
-    .get() as { c: number };
+  const totalPublishedRow = await dbOne<{ c: number }>(
+    `SELECT COUNT(*) as c FROM opc_homework_records WHERE status = 'COMPLETED'`,
+  );
 
+  const totalPublished = totalPublishedRow?.c ?? 0;
   const aiMultiRoundRatio =
-    totalPublishedRow.c > 0
-      ? Math.round((multiRoundRow.multi_count / totalPublishedRow.c) * 1000) /
+    totalPublished > 0
+      ? Math.round(((multiRoundRow?.multi_count ?? 0) / totalPublished) * 1000) /
         1000
       : 0;
 
@@ -603,75 +620,65 @@ export function getInstructorWorkload(instructorId: string) {
 }
 
 export async function getAgentStatus() {
-  const db = getDb();
-  const logs = db
-    .prepare(
-      "SELECT * FROM sys_agent_logs ORDER BY created_at DESC LIMIT 50",
-    )
-    .all();
+  const logs = await dbAll(
+    "SELECT * FROM sys_agent_logs ORDER BY created_at DESC LIMIT 50",
+  );
   const activeCount = await getActiveAgentsCount();
-  const stats = db
-    .prepare(
-      "SELECT COUNT(*) as total, SUM(CASE WHEN result_state='SUCCESS' THEN 1 ELSE 0 END) as success FROM sys_agent_logs",
-    )
-    .get();
+  const stats = await dbOne<{ total: number; success: number }>(
+    "SELECT COUNT(*) as total, SUM(CASE WHEN result_state='SUCCESS' THEN 1 ELSE 0 END) as success FROM sys_agent_logs",
+  );
   return NextResponse.json({ activeCount, logs, stats });
 }
 
-export function listCohorts() {
-  const db = getDb();
-  return NextResponse.json(
-    db.prepare("SELECT * FROM opc_cohorts ORDER BY created_at DESC").all(),
+export async function listCohorts() {
+  const cohorts = await dbAll(
+    "SELECT * FROM opc_cohorts ORDER BY created_at DESC",
   );
+  return NextResponse.json(cohorts);
 }
 
-export function createCohort(body: { name?: string }) {
+export async function createCohort(body: { name?: string }) {
   const { name } = body;
   if (!name) {
     return NextResponse.json({ error: "Missing data" }, { status: 400 });
   }
-  const db = getDb();
   try {
-    db.prepare("INSERT INTO opc_cohorts (name) VALUES (?)").run(name);
+    await dbRun("INSERT INTO opc_cohorts (name) VALUES (?)", [name]);
     return NextResponse.json({ success: true });
   } catch (err: unknown) {
-    const e = err as { code?: string; message?: string };
-    if (e.code === "SQLITE_CONSTRAINT_UNIQUE") {
+    if (isUniqueConstraintError(err)) {
       return NextResponse.json({ error: "班级已存在" }, { status: 400 });
     }
-    return NextResponse.json({ error: e.message }, { status: 500 });
+    const message = err instanceof Error ? err.message : "未知错误";
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }
 
-export function updateCohort(id: string, body: { name?: string }) {
+export async function updateCohort(id: string, body: { name?: string }) {
   const { name } = body;
   if (!name) {
     return NextResponse.json({ error: "Missing data" }, { status: 400 });
   }
-  const db = getDb();
   try {
-    db.prepare("UPDATE opc_cohorts SET name = ? WHERE id = ?").run(name, id);
+    await dbRun("UPDATE opc_cohorts SET name = ? WHERE id = ?", [name, id]);
     return NextResponse.json({ success: true });
   } catch (err: unknown) {
-    const e = err as { code?: string; message?: string };
-    if (e.code === "SQLITE_CONSTRAINT_UNIQUE") {
+    if (isUniqueConstraintError(err)) {
       return NextResponse.json({ error: "班级名称冲突" }, { status: 400 });
     }
-    return NextResponse.json({ error: e.message }, { status: 500 });
+    const message = err instanceof Error ? err.message : "未知错误";
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }
 
-export function deleteCohort(id: string) {
-  const db = getDb();
-  db.prepare("DELETE FROM opc_cohorts WHERE id = ?").run(id);
+export async function deleteCohort(id: string) {
+  await dbRun("DELETE FROM opc_cohorts WHERE id = ?", [id]);
   return NextResponse.json({ success: true });
 }
 
-export function listStudents() {
-  const db = getDb();
-  const students = db
-    .prepare(
-      `
+export async function listStudents() {
+  const students = await dbAll(
+    `
     SELECT s.*, COALESCE(h.hw_count, 0) as hw_count 
     FROM opc_students s
     LEFT JOIN (
@@ -681,12 +688,11 @@ export function listStudents() {
     ) h ON s.student_id = h.student_id
     ORDER BY s.created_at DESC
   `,
-    )
-    .all();
+  );
   return NextResponse.json(students);
 }
 
-export function createStudent(body: {
+export async function createStudent(body: {
   student_id?: string;
   name?: string;
   cohort_name?: string;
@@ -696,22 +702,22 @@ export function createStudent(body: {
   if (!student_id || !name || !cohort_name) {
     return NextResponse.json({ error: "Missing data" }, { status: 400 });
   }
-  const db = getDb();
   try {
-    db.prepare(
+    await dbRun(
       "INSERT INTO opc_students (student_id, name, cohort_name, password) VALUES (?, ?, ?, ?)",
-    ).run(student_id, name, cohort_name, password || "123456");
+      [student_id, name, cohort_name, password || "123456"],
+    );
     return NextResponse.json({ success: true });
   } catch (err: unknown) {
-    const e = err as { code?: string; message?: string };
-    if (e.code === "SQLITE_CONSTRAINT_PRIMARYKEY") {
+    if (isPrimaryKeyConstraintError(err)) {
       return NextResponse.json({ error: "学员ID已存在" }, { status: 400 });
     }
-    return NextResponse.json({ error: e.message }, { status: 500 });
+    const message = err instanceof Error ? err.message : "未知错误";
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }
 
-export function loginStudent(body: {
+export async function loginStudent(body: {
   student_id?: string;
   password?: string;
 }) {
@@ -722,27 +728,25 @@ export function loginStudent(body: {
       { status: 400 },
     );
   }
-  const db = getDb();
-  const student = db
-    .prepare(
-      "SELECT * FROM opc_students WHERE student_id = ? AND password = ?",
-    )
-    .get(student_id, password);
+  const student = await dbOne(
+    "SELECT * FROM opc_students WHERE student_id = ? AND password = ?",
+    [student_id, password],
+  );
   if (!student) {
     return NextResponse.json({ error: "学号或密码错误" }, { status: 401 });
   }
   return NextResponse.json({ success: true, student });
 }
 
-export function getStudent(studentId: string) {
-  const db = getDb();
-  const student = db
-    .prepare("SELECT * FROM opc_students WHERE student_id = ?")
-    .get(studentId);
+export async function getStudent(studentId: string) {
+  const student = await dbOne(
+    "SELECT * FROM opc_students WHERE student_id = ?",
+    [studentId],
+  );
   return NextResponse.json(student || null);
 }
 
-export function updateStudent(
+export async function updateStudent(
   studentId: string,
   body: {
     name?: string;
@@ -755,51 +759,51 @@ export function updateStudent(
   if (!name || !cohort_name) {
     return NextResponse.json({ error: "Missing data" }, { status: 400 });
   }
-  const db = getDb();
   try {
     if (new_student_id && new_student_id !== studentId) {
-      db.prepare(
+      await dbRun(
         "UPDATE opc_students SET student_id = ?, name = ?, cohort_name = ?, password = ? WHERE student_id = ?",
-      ).run(
-        new_student_id,
-        name,
-        cohort_name,
-        password || "123456",
-        studentId,
+        [
+          new_student_id,
+          name,
+          cohort_name,
+          password || "123456",
+          studentId,
+        ],
       );
-      db.prepare(
+      await dbRun(
         "UPDATE opc_homework_records SET student_id = ? WHERE student_id = ?",
-      ).run(new_student_id, studentId);
+        [new_student_id, studentId],
+      );
     } else {
-      db.prepare(
+      await dbRun(
         "UPDATE opc_students SET name = ?, cohort_name = ?, password = ? WHERE student_id = ?",
-      ).run(name, cohort_name, password || "123456", studentId);
+        [name, cohort_name, password || "123456", studentId],
+      );
     }
     return NextResponse.json({ success: true });
   } catch (err: unknown) {
-    const e = err as { message?: string };
-    return NextResponse.json({ error: e.message }, { status: 500 });
+    const message = err instanceof Error ? err.message : "未知错误";
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }
 
-export function deleteStudent(studentId: string) {
-  const db = getDb();
-  db.prepare("DELETE FROM opc_students WHERE student_id = ?").run(studentId);
+export async function deleteStudent(studentId: string) {
+  await dbRun("DELETE FROM opc_students WHERE student_id = ?", [studentId]);
   return NextResponse.json({ success: true });
 }
 
-export function getStudentRanking(studentId: string) {
-  const db = getDb();
-  const student = db
-    .prepare("SELECT cohort_name FROM opc_students WHERE student_id = ?")
-    .get(studentId) as { cohort_name: string } | undefined;
+export async function getStudentRanking(studentId: string) {
+  const student = await dbOne<{ cohort_name: string }>(
+    "SELECT cohort_name FROM opc_students WHERE student_id = ?",
+    [studentId],
+  );
   if (!student) {
     return NextResponse.json({ rankings: [] });
   }
 
-  const rankings = db
-    .prepare(
-      `
+  const rankings = await dbAll(
+    `
     SELECT s.student_id, s.name, COUNT(h.id) as score
     FROM opc_students s
     LEFT JOIN opc_homework_records h ON s.student_id = h.student_id AND h.status = 'COMPLETED'
@@ -808,8 +812,8 @@ export function getStudentRanking(studentId: string) {
     ORDER BY score DESC, s.created_at ASC
     LIMIT 10
   `,
-    )
-    .all(student.cohort_name);
+    [student.cohort_name],
+  );
 
   return NextResponse.json({
     cohort_name: student.cohort_name,
@@ -817,16 +821,14 @@ export function getStudentRanking(studentId: string) {
   });
 }
 
-export function listKnowledgeBase() {
-  const db = getDb();
-  return NextResponse.json(
-    db
-      .prepare("SELECT * FROM opc_knowledge_base ORDER BY created_at DESC")
-      .all(),
+export async function listKnowledgeBase() {
+  const items = await dbAll(
+    "SELECT * FROM opc_knowledge_base ORDER BY created_at DESC",
   );
+  return NextResponse.json(items);
 }
 
-export function createKnowledgeBase(body: {
+export async function createKnowledgeBase(body: {
   title?: string;
   content?: string;
   type?: string;
@@ -835,15 +837,14 @@ export function createKnowledgeBase(body: {
   if (!title || !content || !type) {
     return NextResponse.json({ error: "Missing data" }, { status: 400 });
   }
-  const db = getDb();
-  db.prepare(
+  await dbRun(
     "INSERT INTO opc_knowledge_base (title, content, type) VALUES (?, ?, ?)",
-  ).run(title, content, type);
+    [title, content, type],
+  );
   return NextResponse.json({ success: true });
 }
 
-export function deleteKnowledgeBase(id: string) {
-  const db = getDb();
-  db.prepare("DELETE FROM opc_knowledge_base WHERE id = ?").run(id);
+export async function deleteKnowledgeBase(id: string) {
+  await dbRun("DELETE FROM opc_knowledge_base WHERE id = ?", [id]);
   return NextResponse.json({ success: true });
 }
