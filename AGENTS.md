@@ -54,7 +54,7 @@ demo/                           # 历史原型，不参与构建
 ```
 学员提交作业 → opc_homework_records（WAITING_REVIEW）
       ↓
-waitUntil 立即触发 + Vercel Cron 每分钟兜底（agent-queue.ts）
+waitUntil 立即触发 + Vercel Cron 每小时兜底（agent-queue.ts）
       ↓
 PROCESSING → 生成 opc_ai_feedbacks → PENDING_AUDIT
       ↓
@@ -101,9 +101,9 @@ pnpm db:seed                    # 开发种子（db/seed/dev.sql，幂等）
 1. 安装依赖（见下方命令）并关联 Turso / Blob 集成。
 2. 环境变量：`TURSO_DATABASE_URL`、`TURSO_AUTH_TOKEN`、`BLOB_READ_WRITE_TOKEN`、`CRON_SECRET`。
 3. 对远程库执行 `pnpm db:migrate`。
-4. Deploy 后验证：学员登录 → 提交作业 → 状态变为 `PENDING_AUDIT`（即时或 1 分钟内 Cron）。
+4. Deploy 后验证：学员登录 → 提交作业 → 状态变为 `PENDING_AUDIT`（通常由提交时 `waitUntil` 即时触发；Cron 每小时兜底）。
 
-`vercel.json` 已配置 Cron：`/api/cron/process-homework`（每分钟）。
+`vercel.json` 已配置 Cron：`/api/cron/process-homework`（每小时，`0 * * * *`）。
 
 ## 开发命令
 

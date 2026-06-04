@@ -2,7 +2,7 @@
   "crons": [
     {
       "path": "/api/cron/process-homework",
-      "schedule": "* * * * *"
+      "schedule": "0 * * * *"
     }
   ]
 }
